@@ -2,14 +2,14 @@
 name = "glados"
 version = "0.1.0"
 description = "GLaDOS Voice Assistant"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<4.0"
 dependencies = [
     "sounddevice>=0.5.1",
     "levenshtein>=0.26.1",
     "loguru>=0.7.3",
     "jinja2>=3.1.5",
     "requests>=2.32.3",
-    "textual>=1.0.0",
+    "textual>=1.0.0,<2.0.0",
     "pyyaml>=6.0.2",
     "numba>=0.61.0",
     "soundfile>=0.13.0",
@@ -20,7 +20,10 @@ dependencies = [
 cuda = ["onnxruntime-gpu>=1.16.0"]
 cpu = ["onnxruntime>=1.16.0"]
 dev = ["pytest", "ruff", "ipykernel", "types-requests", "types-PyYAML"]
-
+twitch = [
+    "twitchio[starlette] (>=3.0.0b3,<4.0.0)",
+    "asqlite @ git+https://github.com/Rapptz/asqlite.git",
+]
 
 [project.scripts]
 glados = "glados.cli:main"
@@ -36,6 +39,13 @@ build-backend = "hatchling.build"
 # Same as Black
 line-length = 120
 indent-width = 4
+
+[tool.black]
+line-length = 120
+
+[tool.isort]
+line_length = 120
+
 
 # Enable all rules, including those that replace Black and isort
 lint.extend-select = [
@@ -91,3 +101,6 @@ line-ending = "auto"
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+[tool.poetry.dependencies]
+twitchio = {allow-prereleases = true}

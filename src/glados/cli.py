@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 from pathlib import Path
+import asyncio
 
 import requests
 import sounddevice as sd  # type: ignore
@@ -8,6 +9,7 @@ import sounddevice as sd  # type: ignore
 from .engine import Glados, GladosConfig
 from .TTS import tts_glados
 from .utils import spoken_text_converter as stc
+from .twitch import start_twitch_bot
 
 DEFAULT_CONFIG = Path("configs/glados_config.yaml")
 
@@ -28,7 +30,6 @@ MODEL_URLS = {
     "models/TTS/kokoro-voices-v1.0.bin": "https://github.com/dnhkng/GLaDOS/releases/download/0.1/kokoro-voices-v1.0.bin",
     "models/TTS/phomenizer_en.onnx": "https://github.com/dnhkng/GlaDOS/releases/download/0.1/phomenizer_en.onnx",
 }
-
 
 assert MODEL_CHECKSUMS.keys() == MODEL_URLS.keys()
 
@@ -212,7 +213,7 @@ def say(text: str, config_path: str | Path = "glados_config.yaml") -> None:
     sd.wait()
 
 
-def start(config_path: str | Path = "glados_config.yaml") -> None:
+def start(config_path: str | Path = "glados_config.yaml", mode: str = "audio") -> None:
     """
     Start the GLaDOS voice assistant and initialize its listening event loop.
 
@@ -222,36 +223,89 @@ def start(config_path: str | Path = "glados_config.yaml") -> None:
     Parameters:
         config_path (str | Path, optional): Path to the configuration YAML file.
             Defaults to "glados_config.yaml" in the current directory.
+        mode (str, optional): Interaction mode, either "audio" or "text". Defaults to "audio".
 
     Raises:
         FileNotFoundError: If the specified configuration file cannot be found.
         ValueError: If the configuration file is invalid or cannot be parsed.
 
     Example:
-        start()  # Uses default configuration file
-        start("/path/to/custom/config.yaml")  # Uses a custom configuration file
+        start()  # Uses default configuration file and audio mode
+        start("/path/to/custom/config.yaml", mode="text")  # Uses a custom configuration file and text mode
     """
     glados_config = GladosConfig.from_yaml(str(config_path))
     glados = Glados.from_config(glados_config)
-    glados.start_listen_event_loop()
+
+    if mode == "audio":
+        glados.start_listen_event_loop()
+    elif mode == "text":
+        glados.start_text()
+    elif mode == "twitch":
+        glados.start_auto_talk_loop()
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Must be 'audio' or 'text'.")
 
 
-def tui(config_path: str | Path = "glados_config.yaml") -> None:
+def tui(config_path: str | Path = "glados_config.yaml", mode: str = "audio") -> None:
     """
     Start the GLaDOS voice assistant with a terminal user interface (TUI).
 
     This function initializes the GLaDOS TUI application, which provides decorative
     interface elements for voice interactions.
+
+    Parameters:
+        config_path (str | Path, optional): Path to the configuration YAML file.
+            Defaults to "glados_config.yaml" in the current directory.
+        mode (str, optional): Interaction mode, either "audio" or "text". Defaults to "audio".
     """
 
     import sys
 
     import glados.tui as tui
+
     try:
-        app = tui.GladosUI()
+        app = tui.GladosUI(mode=mode)
         app.run()
     except KeyboardInterrupt:
         sys.exit()
+
+
+async def tui_twitch(config_path: str | Path = "glados_config.yaml") -> None:
+    """
+    Run the GladosUI in Twitch mode and listening to chat (streaming is done in the bash script directly with ffmpeg).
+
+    Args:
+        config_path (str | Path): Path to the configuration file. Defaults to "glados_config.yaml".
+    """
+    import os
+    import glados.tui as tui
+    import sys
+
+    try:
+
+        # Initialize the GladosUI in Twitch mode
+        glados_ui = tui.GladosUI(mode="twitch")
+
+        # Start the Twitch bot as a concurrent task
+        bot_task = asyncio.create_task(start_twitch_bot(glados_ui=glados_ui))
+
+        # Set a unique title for the current terminal window
+        unique_title = f"GladosTwitchStream_{os.getpid()}"
+        print(f"\033]0;{unique_title}\007", flush=True)  # Set terminal title using escape sequence
+
+        # Give streaming time to initialize
+        await asyncio.sleep(2)
+
+        # This start the auto talk, comment it if you don't want this feature
+        # Run the GladosUI application
+        await glados_ui.run_async()
+
+    except KeyboardInterrupt:
+        sys.exit()
+
+    # Wait for the bot task to complete
+    await bot_task
+
 
 def models_valid() -> bool:
     """
@@ -274,10 +328,11 @@ def main() -> None:
     """
     Command-line interface (CLI) entry point for the GLaDOS voice assistant.
 
-    Provides three primary commands:
+    Provides several primary commands:
     - 'download': Download required model files
     - 'start': Launch the GLaDOS voice assistant
     - 'say': Generate speech from input text
+    - 'tui': Start the GLaDOS voice assistant with a terminal user interface
 
     The function sets up argument parsing with optional configuration file paths and handles
     command execution based on user input. If no command is specified, it defaults to starting
@@ -285,6 +340,7 @@ def main() -> None:
 
     Optional Arguments:
         --config (str): Path to configuration file, defaults to 'glados_config.yaml'
+        --mode (str): Interaction mode, either 'audio' or 'text' (default: 'audio')
 
     Raises:
         SystemExit: If invalid arguments are provided
@@ -303,9 +359,23 @@ def main() -> None:
         default=DEFAULT_CONFIG,
         help=f"Path to configuration file (default: {DEFAULT_CONFIG})",
     )
+    start_parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["audio", "text", "twitch"],
+        default="audio",
+        help="Interaction mode: 'audio' for microphone input, 'text', 'twitch' for terminal input (default: 'audio')",
+    )
 
-    # TUI command   
+    # TUI command
     tui_parser = subparsers.add_parser("tui", help="Start GLaDOS voice assistant with TUI")
+    tui_parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["audio", "text", "twitch"],
+        default="audio",
+        help="Interaction mode: 'audio' for microphone input, 'text' for terminal input, 'twitch' for twitch input (default: 'audio')",
+    )
 
     # Say command
     say_parser = subparsers.add_parser("say", help="Make GLaDOS speak text")
@@ -327,9 +397,12 @@ def main() -> None:
         if args.command == "say":
             say(args.text, args.config)
         elif args.command == "start":
-            start(args.config)
+            start(args.config, args.mode)
         elif args.command == "tui":
-            tui()
+            if args.mode == "twitch":
+                asyncio.run(tui_twitch())
+            else:
+                tui(mode=args.mode if "mode" in args else "audio")
         else:
             # Default to start if no command specified
             start(DEFAULT_CONFIG)

@@ -23,7 +23,12 @@ from .ASR import VAD, AudioTranscriber
 from .TTS import tts_glados, tts_kokoro
 from .utils import spoken_text_converter as stc
 
-logger.remove(0)
+try:
+    logger.remove(0)
+except:
+    # no logger to remove
+    pass
+
 logger.add(sys.stderr, level="SUCCESS")
 
 
@@ -162,6 +167,7 @@ class Glados:
         self._tts = tts_model
         self._asr_model = asr_model
         self._stc = stc.SpokenTextConverter()
+        self.last_message_time = time.time()
 
         # warm up onnx ASR model
         self._asr_model.transcribe_file("data/0.wav")
@@ -336,6 +342,90 @@ class Glados:
         except KeyboardInterrupt:
             self.shutdown_event.set()
             self.input_stream.stop()
+
+    def start_text(self) -> None:
+        """
+        Start a text-based interaction loop with Glados using terminal input.
+
+        This method allows the user to communicate with Glados via text input from the terminal.
+        It reads input from the user, sends it to the LLM queue, and prints the assistant's responses.
+        """
+        logger.success("Starting text-based interaction with Glados...")
+        logger.success("Type your message and press Enter to send. Type 'exit' to quit.")
+
+        while not self.shutdown_event.is_set():
+            try:
+                # Read input from the terminal
+                user_input = input("You: ").strip()
+
+                # Exit condition
+                if user_input.lower() == "exit":
+                    logger.info("Exiting text-based interaction.")
+                    break
+
+                # Send the input to the LLM queue
+                self.llm_queue.put(user_input)
+
+                # Wait for the assistant's response
+                self.processing = True
+                self.currently_speaking.set()
+
+                # Wait until the assistant finishes speaking
+                self.currently_speaking.wait()
+
+            except KeyboardInterrupt:
+                logger.info("Exiting text-based interaction.")
+                break
+
+    def start_auto_talk_loop(
+        self,
+        max_silence_time: int = 40,
+        prompt: str = "keep talking please...",
+    ) -> None:
+        """
+        Start a Twitch-like interaction loop that ensures the assistant keeps talking.
+
+        This method continuously monitors the time since the last message was sent to the LLM.
+        If the time since the last message exceeds `max_silence_time`, it automatically sends
+        a "keep talking" message to the LLM to maintain the conversation.
+
+        Args:
+            max_silence_time (int): Maximum allowed silence time in seconds before sending a "keep talking" message.
+                                Defaults to 30 seconds.
+
+        Behavior:
+            - Continuously checks the time since the last message was sent to the LLM.
+            - If the silence time exceeds `max_silence_time`, sends a "keep talking" message to the LLM.
+            - Runs in an infinite loop until the shutdown event is set.
+
+        Raises:
+            KeyboardInterrupt: Allows graceful termination of the loop.
+        """
+        logger.debug("Starting Twitch-like interaction loop...")
+        self.last_message_time = time.time()  # Initialize the last message time
+
+        try:
+            while not self.shutdown_event.is_set():
+                current_time = time.time()
+                time_since_last_message = current_time - self.last_message_time
+
+                if time_since_last_message > max_silence_time:
+                    logger.debug(f"No message for {max_silence_time} seconds. Sending 'keep talking' prompt.")
+                    self.llm_queue.put(prompt)
+                    # Reset the last message time
+                    self.last_message_time = time.time()
+                    # Wait for the assistant's response
+                    self.processing = True
+                    self.currently_speaking.set()
+
+                    # Wait until the assistant finishes speaking
+                    self.currently_speaking.wait()
+
+                time.sleep(1)  # Sleep for a short duration to avoid busy-waiting
+
+        except KeyboardInterrupt:
+            logger.info("Exiting Twitch-like interaction loop.")
+            self.shutdown_event.set()
 
     def _handle_audio_sample(self, sample: NDArray[np.float32], vad_confidence: bool) -> None:
         """
@@ -566,7 +656,10 @@ class Glados:
         completion_event = threading.Event()
 
         def stream_callback(
-            outdata: NDArray[np.float32], frames: int, time: dict[str, Any], status: sd.CallbackFlags
+            outdata: NDArray[np.float32],
+            frames: int,
+            time: dict[str, Any],
+            status: sd.CallbackFlags,
         ) -> tuple[NDArray[np.float32], sd.CallbackStop | None]:
             nonlocal progress, interrupted
             progress += frames
@@ -633,6 +726,10 @@ class Glados:
                     "model": self.model,
                     "stream": True,
                     "messages": self.messages,
+                    "options": {
+                        "num_ctx": 256,
+                        "temperature": 0.8,
+                    },
                 }
                 logger.debug(f"starting request on {self.messages=}")
                 logger.debug("Performing request to LLM server...")
@@ -810,6 +907,8 @@ class Glados:
                     if len(audio):
                         self.audio_queue.put(AudioMessage(audio, spoken_text))
 
+                    self.last_message_time = time.time()
+
             except queue.Empty:
                 pass
 
@@ -914,9 +1013,28 @@ def start() -> None:
         FileNotFoundError: If the configuration file is not found.
         yaml.YAMLError: If there is an error parsing the YAML configuration file.
     """
+    import argparse
+
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Start Glados with audio or text input.")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["audio", "text"],
+        default="audio",
+        help="Choose the interaction mode: 'audio' for microphone input, 'text' for terminal input.",
+    )
+    args = parser.parse_args()
+
     glados_config = GladosConfig.from_yaml("glados_config.yaml")
     glados = Glados.from_config(glados_config)
-    glados.start_listen_event_loop()
+
+    if args.mode == "audio":
+        glados.start_listen_event_loop()
+    elif args.mode == "text":
+        glados.start_text()
+    elif args.mode == "twitch":
+        glados.start_auto_talk_loop()
 
 
 if __name__ == "__main__":
